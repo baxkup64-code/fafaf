@@ -40,6 +40,8 @@ const ACT_CFG = {
     CLEAR_CONFIRM: false, // true = Clear data erst beim 2. Tippen (innerhalb von 4 s) ausfuehren; false = sofort
     CLEAR_CONFIRM_LABEL: "Tap again!", // Beschriftung nach dem 1. Tippen
     CLEAR_KEYCHAIN: true, // true = auch die Keychain-Eintraege der App loeschen (gespeicherte Logins/Account-Schluessel)
+    CLEAR_KEEP_LOG: true, // true = Documents/kitmod.log bleibt beim Clear data erhalten (Diagnose: darin steht, was geloescht wurde und wie der Neustart laeuft)
+    CLEAR_EXTRA: false, // true = zusaetzlich Cookies, URL-Cache, alle NSUserDefaults-Schluessel einzeln und ein 2. Loesch-Durchgang (false = wie die getestete Grundversion)
     CLEAR_KEEP_ACTIVATION: true, // true = die Aktivierungsdatei (Library/Caches/kitmod_act.json) bleibt erhalten; false = wirklich ALLES weg (danach neu aktivieren)
     LAUNCH_AS_GUEST: true, // true = nach der Aktivierung startet "Launch game" direkt das Spiel (Weg des New-game-Buttons: 0x1e095c -> Screen-State 2) statt das Supercell-ID-Login zu oeffnen
     LOCK_LAUNCH: true, // true = solange nicht aktiviert: Klick startet die Telegram-Aktivierung statt den Login (Original-Klick wird unterdrueckt)
@@ -661,8 +663,13 @@ const Act = (() => {
             catch (_) { /* egal */ }
             for (const it of hud.items) {
                 try {
-                    if (root && itemAlive(it, root))
+                    // Lebt das Objekt noch? Gegen den beim Anlegen gemerkten Root pruefen (hudRoot() kann nach dem Screen-Wechsel ein anderer Zeiger sein,
+                    // dann wurde der Text frueher gar nicht angefasst und blieb sichtbar).
+                    if (it.tf.readPointer().equals(it.vt) && it.tf.add(RV.PARENT).readPointer().equals(it.root)) {
+                        setText(it.tf, gstr("")); // leerer Text = sicher unsichtbar, egal wo das Objekt liegt
+                        hud.setW(it.tf, 1);
                         setXY(it.tf, -30000, -30000);
+                    }
                 }
                 catch (_) { /* egal */ }
             }
@@ -699,7 +706,36 @@ const Act = (() => {
                     return;
                 }
                 const h = home.readUtf8String();
-                const keep = ACT_CFG.CLEAR_KEEP_ACTIVATION ? h + "/Library/Caches/kitmod_act.json" : "";
+                const keeps = [];
+                if (ACT_CFG.CLEAR_KEEP_ACTIVATION)
+                    keeps.push(h + "/Library/Caches/kitmod_act.json");
+                if (ACT_CFG.CLEAR_KEEP_LOG)
+                    keeps.push(h + "/Documents/kitmod.log");
+                // Diagnose: vor dem Loeschen auflisten, was in der Sandbox liegt (bis Tiefe 3, max. 120 Zeilen) -> steht danach im erhaltenen Log
+                let listed = 0;
+                const list = (dir, depth) => {
+                    if (depth > 3 || listed >= 120)
+                        return;
+                    const arr = m2(fm, S("contentsOfDirectoryAtPath:error:"), nsstr(dir), NULL);
+                    if (arr.isNull())
+                        return;
+                    const n = Number(mUlongC(arr, S("count")));
+                    for (let i = 0; i < n && listed < 120; i++) {
+                        const name = m0(mUl(arr, S("objectAtIndex:"), i), S("UTF8String")).readUtf8String();
+                        const full = dir + "/" + name;
+                        const isDir = m2(fm, S("contentsOfDirectoryAtPath:error:"), nsstr(full), NULL).isNull() ? "" : "/";
+                        listed++;
+                        alog("[CLEAR] vorher: " + full.substring(h.length) + isDir);
+                        if (isDir)
+                            list(full, depth + 1);
+                    }
+                };
+                for (const sub of ["Documents", "Library", "tmp"]) {
+                    try {
+                        list(h + "/" + sub, 1);
+                    }
+                    catch (_) { /* egal */ }
+                }
                 let removed = 0, failed = 0;
                 const wipe = (dir) => {
                     const arr = m2(fm, S("contentsOfDirectoryAtPath:error:"), nsstr(dir), NULL);
@@ -709,9 +745,9 @@ const Act = (() => {
                     for (let i = 0; i < n; i++) {
                         const name = m0(mUl(arr, S("objectAtIndex:"), i), S("UTF8String")).readUtf8String();
                         const full = dir + "/" + name;
-                        if (keep && full === keep)
+                        if (keeps.indexOf(full) >= 0)
                             continue;
-                        if (keep && keep.indexOf(full + "/") === 0) {
+                        if (keeps.some((k) => k.indexOf(full + "/") === 0)) {
                             wipe(full);
                             continue;
                         } // enthaelt die Aktivierungsdatei -> nur den Inhalt leeren
@@ -726,7 +762,7 @@ const Act = (() => {
                     }
                 };
                 // Zweimal: Dateien, die das Spiel waehrenddessen neu schreibt, fliegen im 2. Durchgang raus (Zaehler zeigen den letzten Durchgang)
-                for (let pass = 0; pass < 2; pass++) {
+                for (let pass = 0; pass < (ACT_CFG.CLEAR_EXTRA ? 2 : 1); pass++) {
                     removed = 0;
                     failed = 0;
                     for (const sub of ["Documents", "Library", "tmp"]) {
@@ -738,7 +774,8 @@ const Act = (() => {
                         }
                     }
                 }
-                try { // Cookies + URL-Cache (liegen zusaetzlich im Speicher)
+                if (ACT_CFG.CLEAR_EXTRA)
+                    try { // Cookies + URL-Cache (liegen zusaetzlich im Speicher)
                     const cs0 = m0(C("NSHTTPCookieStorage"), S("sharedHTTPCookieStorage"));
                     const ca = m0(cs0, S("cookies"));
                     const cn = ca.isNull() ? 0 : Number(mUlongC(ca, S("count")));
@@ -747,7 +784,8 @@ const Act = (() => {
                     m0(m0(C("NSURLCache"), S("sharedURLCache")), S("removeAllCachedResponses"));
                 }
                 catch (_) { /* egal */ }
-                try { // alle NSUserDefaults-Schluessel einzeln entfernen (zusaetzlich zur Domain unten)
+                if (ACT_CFG.CLEAR_EXTRA)
+                    try { // alle NSUserDefaults-Schluessel einzeln entfernen (zusaetzlich zur Domain unten)
                     const ud = m0(C("NSUserDefaults"), S("standardUserDefaults"));
                     const keys = m0(m0(ud, S("dictionaryRepresentation")), S("allKeys"));
                     const kn = Number(mUlongC(keys, S("count")));
@@ -955,6 +993,8 @@ const Act = (() => {
                         out.push(names[r] + " 0x" + r.toString(16) + ": " + ((w >>> 26) === 5 ? "gepatcht (b)" : "ORIGINAL (0x" + w.toString(16) + ") -> Binary nicht gepatcht!"));
                     }
                     alog("[LS] Patch-Check:", out.join(" | "));
+                    if (out.some((x) => x.indexOf("ORIGINAL") >= 0))
+                        alog("[LS] WARNUNG: laufende Binary ist NICHT laser_patched -> ScreenManager.update-Hook fehlt, der Login-Screen wird erst erzwungen, wenn das Spiel schon in State 2 laeuft (Absturzgefahr). laser_patched als Haupt-Binary in die IPA!");
                     let slot = "?";
                     try {
                         slot = B.add(0x1224000).readPointer().isNull() ? "leer" : "gefuellt";

@@ -501,7 +501,7 @@ const Act = (() => {
             denied: "\u043d\u0435\u0442 \u043b\u0438\u0446\u0435\u043d\u0437\u0438\u0438 \u0434\u043b\u044f \u044d\u0442\u043e\u0433\u043e Telegram", offline: "\u0441\u0435\u0440\u0432\u0435\u0440 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d",
         };
         const st = { mode: "off", next: 0 };
-        const hud = { build: false, gone: false, lastLog: 0, loadAsset: null, setFont: null, setW: null, setH: null, root: null, items: [], scTried: false, busy: false, last: 0, creates: 0, fails: 0, hooks: [], w: 0, size: 0 };
+        const hud = { build: false, gone: false, lastLog: 0, loadAsset: null, setFont: null, setW: null, setH: null, root: null, items: [], all: [], seen: false, scTried: false, busy: false, last: 0, creates: 0, fails: 0, hooks: [], w: 0, size: 0 };
         const plain = (l) => l.replace(/<\/?c[0-9a-fA-F]{0,8}>/g, "");
         const statusText = () => {
             const red = (t) => "<cff3b30>" + t + "</c>", grey = (t) => "<cb0b0b0>" + t + "</c>";
@@ -560,7 +560,9 @@ const Act = (() => {
             if (tf.isNull())
                 return null;
             addChild(root, tf);
-            return { key, tf, vt: tf.readPointer(), text: "", x: NaN, y: NaN, root };
+            const it = { key, tf, vt: tf.readPointer(), text: "", x: NaN, y: NaN, root };
+            hud.all.push(it); // jeder Text wird gemerkt, bis er sicher unsichtbar gemacht wurde
+            return it;
         }
         function place(it, text, size, x, y) {
             const w = Math.ceil(plain(text).length * size * 0.84) + 8, h = 50;
@@ -597,12 +599,7 @@ const Act = (() => {
                     return;
                 }
                 if (hud.gone || (started && !ACT_CFG.ALWAYS_LOGIN)) {
-                    for (const it of hud.items)
-                        if (itemAlive(it, root)) {
-                            setXY(it.tf, NaN, NaN);
-                            it.x = NaN;
-                        }
-                    hud.items = hud.items.filter(() => false);
+                    hudBlankAll(); // wirklich ausblenden (Text leer + weit weg), nicht nur vergessen
                     hudStop();
                     return;
                 }
@@ -619,6 +616,7 @@ const Act = (() => {
                 for (const k of keys) {
                     let it = hud.items.find((x) => x.key === k);
                     if (it && (!itemAlive(it, root) || it.root !== root)) {
+                        hudBlank(it);
                         hud.items = hud.items.filter((x) => x !== it);
                         it = undefined;
                     }
@@ -653,27 +651,31 @@ const Act = (() => {
         }
         // Startscreen-Texte wirklich loswerden: aus dem Sichtbereich schieben und vergessen (nichts freigeben -> kein Double-Free).
         // Vorher passierte das nie: nach dem Verlassen des Login-Screens (hud.gone) lief hudTick nicht mehr, der Aufraeum-Zweig darin wurde nie erreicht.
-        function hudClear(why) {
-            if (!hud.items.length)
-                return;
-            let root = null;
+        function hudBlank(it) {
             try {
-                root = hudRoot();
+                // nur das Vtable-Wort pruefen (lebt das Objekt noch?), NICHT den Parent: der kann nach Screen-Wechseln ein anderer Zeiger sein
+                if (it.tf.readPointer().equals(it.vt)) {
+                    setText(it.tf, gstr("")); // leerer Text = unsichtbar, egal wo das Objekt liegt
+                    hud.setW(it.tf, 1);
+                    setXY(it.tf, -30000, -30000);
+                    it.text = "";
+                    it.x = NaN;
+                    return true;
+                }
             }
             catch (_) { /* egal */ }
-            for (const it of hud.items) {
-                try {
-                    // Lebt das Objekt noch? Gegen den beim Anlegen gemerkten Root pruefen (hudRoot() kann nach dem Screen-Wechsel ein anderer Zeiger sein,
-                    // dann wurde der Text frueher gar nicht angefasst und blieb sichtbar).
-                    if (it.tf.readPointer().equals(it.vt) && it.tf.add(RV.PARENT).readPointer().equals(it.root)) {
-                        setText(it.tf, gstr("")); // leerer Text = sicher unsichtbar, egal wo das Objekt liegt
-                        hud.setW(it.tf, 1);
-                        setXY(it.tf, -30000, -30000);
-                    }
-                }
-                catch (_) { /* egal */ }
-            }
+            return false;
+        }
+        function hudBlankAll() {
+            for (const it of hud.all)
+                hudBlank(it);
             hud.items = [];
+            hud.all = [];
+        }
+        function hudClear(why) {
+            if (!hud.all.length && !hud.items.length)
+                return;
+            hudBlankAll();
             alog("[HUD] Startscreen-Texte entfernt (" + why + ")");
         }
         function hudStop() { const hs = hud.hooks; hud.hooks = []; setTimeout(() => { for (const h of hs) {
@@ -865,6 +867,8 @@ const Act = (() => {
                 if (ACT_CFG.HUD) {
                     hud.build = true;
                     hud.gone = false;
+                    hud.seen = false;
+                    hud.creates = 0;
                     hud.last = 0;
                     try {
                         hudTick();
@@ -1076,6 +1080,19 @@ const Act = (() => {
                     if (mgr.isNull())
                         return;
                     const cur = mgr.add(MG.CUR).readS32(), req = mgr.add(MG.REQ).readS32();
+                    if (cur === MG.LOGIN && hud.build)
+                        hud.seen = true;
+                    // Sicherheitsnetz: steht ein anderer Screen als der Login-Screen, duerfen keine Startscreen-Texte da sein
+                    if (hud.seen && cur !== MG.LOGIN && req !== MG.LOGIN && (hud.all.length || hud.items.length)) {
+                        hud.gone = true;
+                        hud.seen = false;
+                        onMain(() => { try {
+                            hudClear("kein Login-Screen (State " + cur + ")");
+                        }
+                        catch (e) {
+                            alog("[HUD] clear:", e);
+                        } });
+                    }
                     if (cur !== lastCur) {
                         if (lastCur === MG.LOGIN && cur !== MG.LOGIN) {
                             hud.gone = true;

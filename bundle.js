@@ -1,3 +1,4 @@
+globalThis.__kmGate = { login: false, onLeft: null }; // login = Login-Screen (State 8) ist angefordert/aktiv
 /******/ (() => { // webpackBootstrap
 /******/ 	"use strict";
 var __webpack_exports__ = {};
@@ -648,6 +649,26 @@ const Act = (() => {
                 hud.busy = false;
             }
         }
+        // Startscreen-Texte wirklich loswerden: aus dem Sichtbereich schieben und vergessen (nichts freigeben -> kein Double-Free).
+        // Vorher passierte das nie: nach dem Verlassen des Login-Screens (hud.gone) lief hudTick nicht mehr, der Aufraeum-Zweig darin wurde nie erreicht.
+        function hudClear(why) {
+            if (!hud.items.length)
+                return;
+            let root = null;
+            try {
+                root = hudRoot();
+            }
+            catch (_) { /* egal */ }
+            for (const it of hud.items) {
+                try {
+                    if (root && itemAlive(it, root))
+                        setXY(it.tf, -30000, -30000);
+                }
+                catch (_) { /* egal */ }
+            }
+            hud.items = [];
+            alog("[HUD] Startscreen-Texte entfernt (" + why + ")");
+        }
         function hudStop() { const hs = hud.hooks; hud.hooks = []; setTimeout(() => { for (const h of hs) {
             try {
                 h.detach();
@@ -776,6 +797,7 @@ const Act = (() => {
                 catch (e) {
                     alog("[LS] Umbenennen:", e);
                 }
+                globalThis.__kmGate.login = true;
                 // Text oben JETZT anlegen: der Builder hat den Login-Screen und fade_rect gerade in den Root gehaengt, neue Kinder liegen darueber
                 if (ACT_CFG.HUD) {
                     hud.build = true;
@@ -810,6 +832,13 @@ const Act = (() => {
                     if (started) { // aktiviert: Spiel starten
                         if (ACT_CFG.LAUNCH_AS_GUEST && btn.equals(sc) && !gb.isNull()) {
                             alog("[LS] Launch game: aktiviert - starte das Spiel (ohne Supercell ID)");
+                            hud.gone = true;
+                            try {
+                                hudClear("Launch game");
+                            }
+                            catch (e) {
+                                alog("[HUD] clear:", e);
+                            }
                             return gb; // Original-Handler nimmt den New-game-Zweig (0x1e095c) -> Screen-State 2 = ins Spiel
                         }
                         return btn;
@@ -983,8 +1012,24 @@ const Act = (() => {
                         return;
                     const cur = mgr.add(MG.CUR).readS32(), req = mgr.add(MG.REQ).readS32();
                     if (cur !== lastCur) {
-                        if (lastCur === MG.LOGIN && cur !== MG.LOGIN)
+                        if (lastCur === MG.LOGIN && cur !== MG.LOGIN) {
                             hud.gone = true;
+                            onMain(() => { try {
+                                hudClear("Login-Screen verlassen");
+                            }
+                            catch (e) {
+                                alog("[HUD] clear:", e);
+                            } });
+                            const g = globalThis.__kmGate;
+                            g.login = false;
+                            try {
+                                if (g.onLeft)
+                                    g.onLeft();
+                            }
+                            catch (e) {
+                                alog("[LS] onLeft:", e);
+                            }
+                        }
                         alog("[LS] Screen-State: " + lastCur + " -> " + cur + " (angefordert=" + req + ")");
                         lastCur = cur;
                     }
@@ -1011,6 +1056,7 @@ const Act = (() => {
                         return;
                     }
                     forced = true;
+                    globalThis.__kmGate.login = true;
                     mgr.add(MG.REQ).writeS32(MG.LOGIN);
                     alog("[LS] Login-Screen angefordert: State " + MG.LOGIN + " -> +0x2c (aktueller State war " + cur + ")");
                 }
@@ -1039,6 +1085,7 @@ const Act = (() => {
                             return;
                         fl.done = true;
                         if (req !== MG.LOGIN && cur !== MG.LOGIN) {
+                            globalThis.__kmGate.login = true;
                             m.add(MG.REQ).writeS32(MG.LOGIN);
                             alog("[LS] Start-Anforderung State " + req + " -> Login-Screen (State " + MG.LOGIN + ") umgeleitet");
                         }
@@ -2894,6 +2941,11 @@ function uiOpen(container) {
             return;
         }
         UI.open = true;
+        if (!(UI.cx > 200 && UI.cx < 1800 && UI.cy > 100 && UI.cy < 900)) { // Menue lag ausserhalb des Bildschirms -> Mitte
+            UI.cx = UI.cx0;
+            UI.cy = UI.cy0;
+            UI.manualPos = false;
+        }
         uiAutoCenter();
         uiApply();
         uiTabsRefresh();
@@ -2957,7 +3009,8 @@ function uiAutoCenter(force) {
             }
         }
     }
-    if (!cx && UI.rootW > 600 && UI.rootH > 300) {
+    // Root-getWidth/getHeight liefert die Bounds ALLER Kinder (im Log 23617x6246) -> nur plausible UI-Raeume akzeptieren
+    if (!cx && UI.rootW > 900 && UI.rootW < 1700 && UI.rootH > 500 && UI.rootH < 800) {
         const okAspect = !SCREEN || Math.abs(UI.rootW / UI.rootH - SCREEN.w / SCREEN.h) < 0.12 * (SCREEN.w / SCREEN.h);
         if (okAspect) {
             cx = UI.rootW / 2;
@@ -2966,7 +3019,8 @@ function uiAutoCenter(force) {
         }
     }
     if (!cx) {
-        if (force) {
+        const bad = !(UI.cx > 200 && UI.cx < 1800 && UI.cy > 100 && UI.cy < 900);
+        if (force || bad) {
             UI.cx = UI.cx0;
             UI.cy = UI.cy0;
             if (UI.open)
@@ -3431,7 +3485,7 @@ function persistLoad() {
             CFG.toggleX = +d.toggle[0];
             CFG.toggleY = +d.toggle[1];
         }
-        if (ok2(d.panel)) {
+        if (ok2(d.panel) && d.panel[0] > 200 && d.panel[0] < 1800 && d.panel[1] > 100 && d.panel[1] < 900) {
             UI.cx = +d.panel[0];
             UI.cy = +d.panel[1];
             UI.manualPos = true;
@@ -3682,6 +3736,8 @@ Interceptor.attach(base.add(O.SpriteAddChild), {
         // Zuerst versuchen, direkt im Root-Container (oberster Parent, bleibt zwischen Screens
         // bestehen) anzudocken -> Button ist dann immer da. Klappt das nicht (Parent noch nicht
         // an die Szene gehaengt), wird beim naechsten Touch erneut versucht.
+        if (loginBlocked())
+            return;
         if (n === CFG.minAdds) {
             pending = parent;
             log("Parent vorgemerkt (Touch-Fallback):", parent);
@@ -3721,9 +3777,31 @@ function chainOf(p, fast) {
     return chain;
 }
 // Legt das Menue einmalig im obersten Container an. Gibt true zurueck, wenn es geklappt hat.
+function loginBlocked() {
+    try {
+        if (globalThis.__kmGate && globalThis.__kmGate.login)
+            return true;
+        const mgr = base.add(0x1182d10).readPointer(); // ScreenManager, +0x28 = aktueller State (8 = Login-Screen)
+        return !mgr.isNull() && mgr.add(0x28).readS32() === 8;
+    }
+    catch (_) {
+        return false;
+    }
+}
+// Beim Verlassen des Login-Screens alles verwerfen, was an ihm hing (Parent-Vormerkung, Zaehler, evtl. schon dort gebautes Menue)
+globalThis.__kmGate.onLeft = () => {
+    pending = null;
+    addCounts.clear();
+    foreign.clear();
+    lastLen.clear();
+    if (rootMenu)
+        teardown("Login-Screen verlassen");
+};
 function ensureRootMenu(from, quiet) {
     if (rootMenu || probed)
         return true;
+    if (loginBlocked())
+        return false; // NICHT im Login-Screen bauen: der Container wird mit dem Screen freigegeben -> Crash beim Wechsel in die Lobby
     const chain = chainOf(from);
     const key = from.toString();
     if (!quiet || lastLen.get(key) !== chain.length) {
@@ -3765,6 +3843,8 @@ function buildMenu(parent, x, y) {
     if (failures >= MAX_FAILURES)
         return; // Datei fehlt -> nicht weiter versuchen
     if (menus.some((m) => m.parent.equals(parent)))
+        return;
+    if (loginBlocked())
         return;
     try {
         ownReg(parent, null); // Root merken (vtable), damit wir sein Verschwinden erkennen

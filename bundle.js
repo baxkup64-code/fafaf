@@ -718,18 +718,43 @@ const Act = (() => {
                         const ok = m2(fm, S("removeItemAtPath:error:"), nsstr(full), NULL);
                         if (ok.toInt32() & 0xff)
                             removed++;
-                        else
+                        else {
                             failed++;
+                            if (failed <= 5)
+                                alog("[CLEAR] nicht geloescht: " + full);
+                        }
                     }
                 };
-                for (const sub of ["Documents", "Library", "tmp"]) {
-                    try {
-                        wipe(h + "/" + sub);
-                    }
-                    catch (e) {
-                        alog("[CLEAR] " + sub + ":", e);
+                // Zweimal: Dateien, die das Spiel waehrenddessen neu schreibt, fliegen im 2. Durchgang raus (Zaehler zeigen den letzten Durchgang)
+                for (let pass = 0; pass < 2; pass++) {
+                    removed = 0;
+                    failed = 0;
+                    for (const sub of ["Documents", "Library", "tmp"]) {
+                        try {
+                            wipe(h + "/" + sub);
+                        }
+                        catch (e) {
+                            alog("[CLEAR] " + sub + ":", e);
+                        }
                     }
                 }
+                try { // Cookies + URL-Cache (liegen zusaetzlich im Speicher)
+                    const cs0 = m0(C("NSHTTPCookieStorage"), S("sharedHTTPCookieStorage"));
+                    const ca = m0(cs0, S("cookies"));
+                    const cn = ca.isNull() ? 0 : Number(mUlongC(ca, S("count")));
+                    for (let i = cn - 1; i >= 0; i--)
+                        m1(cs0, S("deleteCookie:"), mUl(ca, S("objectAtIndex:"), i));
+                    m0(m0(C("NSURLCache"), S("sharedURLCache")), S("removeAllCachedResponses"));
+                }
+                catch (_) { /* egal */ }
+                try { // alle NSUserDefaults-Schluessel einzeln entfernen (zusaetzlich zur Domain unten)
+                    const ud = m0(C("NSUserDefaults"), S("standardUserDefaults"));
+                    const keys = m0(m0(ud, S("dictionaryRepresentation")), S("allKeys"));
+                    const kn = Number(mUlongC(keys, S("count")));
+                    for (let i = 0; i < kn; i++)
+                        m1(ud, S("removeObjectForKey:"), mUl(keys, S("objectAtIndex:"), i));
+                }
+                catch (_) { /* egal */ }
                 try { // gespeicherte Einstellungen (NSUserDefaults) der App ebenfalls verwerfen
                     const bid = m0(m0(C("NSBundle"), S("mainBundle")), S("bundleIdentifier"));
                     if (!bid.isNull())

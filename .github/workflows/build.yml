@@ -1,0 +1,51 @@
+name: Build kitmod.dylib
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool-Versionen
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          python3 --version
+          node --version
+
+      # Nur wenn du die Original-Binary "laser" ins Repo legst (optional)
+      - name: laser_patched pruefen
+        run: |
+          if [ -f laser ]; then
+            python3 tools/verify_patched.py laser laser_patched hooks.json
+          else
+            echo "Keine Original-Datei 'laser' im Repo - Pruefung uebersprungen"
+          fi
+
+      - name: Dylib bauen
+        working-directory: dylib
+        run: make
+
+      - name: Dylib kontrollieren
+        working-directory: dylib
+        run: |
+          file kitmod.dylib
+          lipo -info kitmod.dylib
+          otool -L kitmod.dylib
+          ls -la kitmod.dylib
+
+      - name: Paket zusammenstellen
+        run: |
+          mkdir -p out
+          cp dylib/kitmod.dylib out/
+          cp laser_patched out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kitmod-build
+          path: out/
+          if-no-files-found: error

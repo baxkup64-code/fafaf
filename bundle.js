@@ -749,92 +749,174 @@ const Act = (() => {
                     catch (_2) { /* egal */ }
                 } // _exit: keine atexit-Handler, das Spiel kann seine Daten nicht noch einmal schreiben
             }
-            Interceptor.attach(B.add(LS.BUILD), {
-                onEnter(args) { this.scr = args[0]; alog("[LS] >>> LoginScreenBauen 0x2b6398 this=" + args[0] + (ACT_CFG.LS_LOG ? " Aufrufer: " + (() => { try {
-                    return Thread.backtrace(this.context, Backtracer.FUZZY).map((x) => x.sub(B)).filter((r) => r.compare(ptr(0x2000000)) < 0 && r.compare(ptr(0)) >= 0).slice(0, 8).map((r) => "0x" + r.toString(16)).join(" < ");
-                }
-                catch (_) {
-                    return "bt-fehler";
-                } })() : "")); },
-                onLeave() {
-                    try {
-                        const b = this.scr.add(LS.SCID).readPointer();
-                        if (b.isNull()) {
-                            alog("[LS] button_scid fehlt (this+0x20 = NULL)");
-                            return;
-                        }
+            // ---------- gemeinsame Logik: wird vom statischen Hook UND vom vtable-Weg benutzt ----------
+            // vt.ok = Builder/ButtonPressed laufen ueber die vtable des Login-Screens (Klasse vtable base+0x1010d88, State 8).
+            // Das braucht KEINEN gepatchten Hook (nur Daten-Writes + NativeCallback), die Hooks sind dann stumm (kein Doppel-Handling).
+            const vt = { ok: false }, vtKeep = [];
+            const hk = { build: 0, press: 0, upd: 0, lastUpd: 0 };
+            function lsAfterBuild(scr) {
+                try {
+                    const b = scr.add(LS.SCID).readPointer();
+                    if (b.isNull()) {
+                        alog("[LS] button_scid fehlt (this+0x30 = NULL)");
+                    }
+                    else {
                         setBtnText(b, cs("txt"), gstr(ACT_CFG.LAUNCH_LABEL));
                         alog("[LS] Login-Button umbenannt ->", ACT_CFG.LAUNCH_LABEL);
-                        const g = this.scr.add(LS.GUEST).readPointer();
-                        if (g.isNull())
-                            alog("[LS] button_guest fehlt (this+0x28 = NULL)");
-                        else {
-                            clr.armed = 0;
-                            setBtnText(g, cs("txt"), gstr(ACT_CFG.CLEAR_LABEL));
-                            alog("[LS] Zweiter Button umbenannt ->", ACT_CFG.CLEAR_LABEL);
-                        }
+                    }
+                    const g = scr.add(LS.GUEST).readPointer();
+                    if (g.isNull())
+                        alog("[LS] button_guest fehlt (this+0x38 = NULL)");
+                    else {
+                        clr.armed = 0;
+                        setBtnText(g, cs("txt"), gstr(ACT_CFG.CLEAR_LABEL));
+                        alog("[LS] Zweiter Button umbenannt ->", ACT_CFG.CLEAR_LABEL);
+                    }
+                }
+                catch (e) {
+                    alog("[LS] Umbenennen:", e);
+                }
+                // Text oben JETZT anlegen: der Builder hat den Login-Screen und fade_rect gerade in den Root gehaengt, neue Kinder liegen darueber
+                if (ACT_CFG.HUD) {
+                    hud.build = true;
+                    hud.gone = false;
+                    hud.last = 0;
+                    try {
+                        hudTick();
                     }
                     catch (e) {
-                        alog("[LS] Umbenennen:", e);
+                        alog("[HUD] Build-Tick:", e);
                     }
-                    // Text oben JETZT anlegen: der Builder hat den Login-Screen und fade_rect gerade in den Root gehaengt, neue Kinder liegen darueber
-                    if (ACT_CFG.HUD) {
-                        hud.build = true;
-                        hud.gone = false;
-                        hud.last = 0;
-                        try {
-                            hudTick();
+                }
+            }
+            // ButtonPressed(self, button) -> Button, der an den Original-Handler weitergegeben wird (NULL = Klick unterdruecken)
+            function lsOnPress(self, btn) {
+                try {
+                    const sc = self.add(LS.SCID).readPointer(), gb = self.add(LS.GUEST).readPointer();
+                    alog("[LS] ButtonPressed button=" + btn + " scid=" + sc + " guest=" + gb + (vt.ok ? " (vtable)" : " (hook)"));
+                    if (!gb.isNull() && btn.equals(gb)) { // "Clear data"
+                        alog("[LS] Clear data gedrueckt (Bestaetigung: " + (ACT_CFG.CLEAR_CONFIRM ? "an" : "aus") + ")");
+                        const now = Date.now();
+                        if (ACT_CFG.CLEAR_CONFIRM && !(clr.armed && now - clr.armed < 4000)) {
+                            clr.armed = now;
+                            setBtnText(gb, cs("txt"), gstr(ACT_CFG.CLEAR_CONFIRM_LABEL));
+                            alog("[LS] Clear data: nochmal tippen zum Bestaetigen");
+                            return ptr(0);
+                        }
+                        clr.armed = 0;
+                        clearAppData(); // beendet die App (_exit)
+                        return ptr(0); // Original ("New game") unterdruecken
+                    }
+                    if (started) { // aktiviert: Spiel starten
+                        if (ACT_CFG.LAUNCH_AS_GUEST && btn.equals(sc) && !gb.isNull()) {
+                            alog("[LS] Launch game: aktiviert - starte das Spiel (ohne Supercell ID)");
+                            return gb; // Original-Handler nimmt den New-game-Zweig (0x1e095c) -> Screen-State 2 = ins Spiel
+                        }
+                        return btn;
+                    }
+                    if (!ACT_CFG.LOCK_LAUNCH)
+                        return btn;
+                    if (btn.equals(sc)) {
+                        setTimeout(() => { try {
+                            retryNow();
                         }
                         catch (e) {
-                            alog("[HUD] Build-Tick:", e);
-                        }
+                            alog(e);
+                        } }, 0);
+                        alog("[LS] Launch game gedrueckt - Telegram-Aktivierung statt Login");
+                        return ptr(0); // Original-Handler findet keinen Treffer -> kein Login
                     }
-                },
+                }
+                catch (e) {
+                    alog("[LS] Press:", e);
+                }
+                return btn;
+            }
+            // ---------- Weg 1: statische Hooks (nur aktiv, wenn der vtable-Weg nicht geht) ----------
+            Interceptor.attach(B.add(LS.BUILD), {
+                onEnter(args) { this.scr = args[0]; hk.build++; if (vt.ok) return; alog("[LS] >>> LoginScreenBauen (Hook) this=" + args[0]); },
+                onLeave() { if (vt.ok) return; lsAfterBuild(this.scr); },
             });
             Interceptor.attach(B.add(LS.PRESS), {
-                onEnter(args) {
-                    try {
-                        alog("[LS] ButtonPressed button=" + args[1] + " scid=" + args[0].add(LS.SCID).readPointer() + " guest=" + args[0].add(LS.GUEST).readPointer());
-                        const gb = args[0].add(LS.GUEST).readPointer();
-                        if (!gb.isNull() && args[1].equals(gb)) { // "Clear data"
-                            alog("[LS] Clear data gedrueckt (Bestaetigung: " + (ACT_CFG.CLEAR_CONFIRM ? "an" : "aus") + ")");
-                            args[1] = ptr(0); // Original ("New game") unterdruecken
-                            const now = Date.now();
-                            if (ACT_CFG.CLEAR_CONFIRM && !(clr.armed && now - clr.armed < 4000)) {
-                                clr.armed = now;
-                                setBtnText(gb, cs("txt"), gstr(ACT_CFG.CLEAR_CONFIRM_LABEL));
-                                alog("[LS] Clear data: nochmal tippen zum Bestaetigen");
-                                return;
-                            }
-                            clr.armed = 0;
-                            clearAppData();
-                            return;
-                        }
-                        if (started) { // aktiviert: Spiel starten
-                            if (ACT_CFG.LAUNCH_AS_GUEST && args[1].equals(args[0].add(LS.SCID).readPointer()) && !args[0].add(LS.GUEST).readPointer().isNull()) {
-                                args[1] = args[0].add(LS.GUEST).readPointer(); // Original-Handler nimmt den New-game-Zweig (0x1e095c) -> Screen-State 2 = ins Spiel
-                                alog("[LS] Launch game: aktiviert - starte das Spiel (ohne Supercell ID)");
-                            }
-                            return;
-                        }
-                        if (!ACT_CFG.LOCK_LAUNCH)
-                            return;
-                        if (args[1].equals(args[0].add(LS.SCID).readPointer())) {
-                            args[1] = ptr(0); // Original-Handler findet keinen Treffer -> kein Login
-                            setTimeout(() => { try {
-                                retryNow();
-                            }
-                            catch (e) {
-                                alog(e);
-                            } }, 0);
-                            alog("[LS] Launch game gedrueckt - Telegram-Aktivierung statt Login");
-                        }
-                    }
-                    catch (e) {
-                        alog("[LS] Press:", e);
-                    }
-                },
+                onEnter(args) { hk.press++; if (vt.ok) return; args[1] = lsOnPress(args[0], args[1]); },
             });
+            // ---------- Weg 2: vtable der Login-Screen-Klasse (State 8) umbiegen, unabhaengig von den Binary-Patches ----------
+            //   primaer  base+0x1010d88: Slot 8 (+0x40) = Builder 0x31bacc, Slot 24 (+0xc0) = ButtonPressed 0x31c1d4
+            //   sekundaer base+0x1010e60 (Listener-Basis bei this+0x10): Slot 1 (+8) = Thunk 0x31c250 -> 0x31c1d4 (this-0x10)
+            //   Der Game-Thread ruft den Builder per "blr [vtable+0x40]" (ScreenManager 0x315ef0) -> unser NativeCallback ruft das Original und benennt danach um.
+            function vtInstall() {
+                const VP = B.add(0x1010d88), VS = B.add(0x1010e60);
+                const sB = VP.add(0x40), sP = VP.add(0xc0), sP2 = VS.add(8);
+                const oldB = B.add(LS.BUILD), oldP = B.add(LS.PRESS), oldP2 = B.add(0x31c250);
+                let done = 0;
+                try {
+                    if (!sB.readPointer().equals(oldB) || !sP.readPointer().equals(oldP) || !sP2.readPointer().equals(oldP2)) {
+                        alog("[LS] vtable-Weg: Eintraege unerwartet (Binary-Version?) - nur Hooks");
+                        return false;
+                    }
+                    const oB = f(LS.BUILD, "void", ["pointer"]), oP = f(LS.PRESS, "void", ["pointer", "pointer"]), oP2 = f(0x31c250, "void", ["pointer", "pointer"]);
+                    const cbB = new NativeCallback((self) => {
+                        alog("[LS] vtable-Builder aufgerufen this=" + self);
+                        oB(self);
+                        hk.vb = (hk.vb || 0) + 1;
+                        alog("[LS] >>> LoginScreenBauen (vtable) this=" + self);
+                        lsAfterBuild(self);
+                    }, "void", ["pointer"]);
+                    const cbP = new NativeCallback((self, btn) => { oP(self, lsOnPress(self, btn)); }, "void", ["pointer", "pointer"]);
+                    const cbP2 = new NativeCallback((self2, btn) => { oP2(self2, lsOnPress(self2.sub(0x10), btn)); }, "void", ["pointer", "pointer"]);
+                    vtKeep.push(cbB, cbP, cbP2);
+                    globalThis.__lsKeep = vtKeep; // Callbacks duerfen nie vom GC freigegeben werden (die vtable zeigt dauerhaft darauf)
+                    vt.ok = true; // vor dem ersten moeglichen Aufruf setzen (Hooks muessen dann schweigen)
+                    sB.writePointer(cbB);
+                    done = 1;
+                    sP.writePointer(cbP);
+                    done = 2;
+                    sP2.writePointer(cbP2);
+                    done = 3;
+                    alog("[LS] vtable-Weg aktiv: Builder + ButtonPressed des Login-Screens umgebogen");
+                    return true;
+                }
+                catch (e) {
+                    alog("[LS] vtable-Weg fehlgeschlagen:", e, "- zurueck auf Hooks");
+                    try {
+                        if (done >= 1)
+                            sB.writePointer(oldB);
+                        if (done >= 2)
+                            sP.writePointer(oldP);
+                        if (done >= 3)
+                            sP2.writePointer(oldP2);
+                    }
+                    catch (_) { /* egal */ }
+                    vt.ok = false;
+                    return false;
+                }
+            }
+            // Selbsttest: sind die statischen Patches in der laufenden Binary ueberhaupt aktiv?
+            function patchCheck() {
+                try {
+                    const names = { 0x31bacc: "Builder", 0x31c1d4: "ButtonPressed", 0x315cc0: "ScreenManager.update" };
+                    const out = [];
+                    for (const r of Object.keys(names).map(Number)) {
+                        const w = B.add(r).readU32() >>> 0;
+                        out.push(names[r] + " 0x" + r.toString(16) + ": " + ((w >>> 26) === 5 ? "gepatcht (b)" : "ORIGINAL (0x" + w.toString(16) + ") -> Binary nicht gepatcht!"));
+                    }
+                    alog("[LS] Patch-Check:", out.join(" | "));
+                    let slot = "?";
+                    try {
+                        slot = B.add(0x1224000).readPointer().isNull() ? "leer" : "gefuellt";
+                    }
+                    catch (_) {
+                        slot = "kein __KMDATA-Segment";
+                    }
+                    alog("[LS] Hook-Slot[0] (base+0x1224000):", slot);
+                }
+                catch (e) {
+                    alog("[LS] Patch-Check:", e);
+                }
+            }
+            patchCheck();
+            const vtOk = vtInstall();
+            setTimeout(() => { alog("[LS] Treffer nach 10 s: Hook-Build=" + hk.build + " Hook-Press=" + hk.press + " Hook-Update=" + hk.upd + " vtable-Build=" + (hk.vb || 0) + " (vtable-Weg " + (vtOk ? "an" : "aus") + ")"); }, 10000);
             if (false) { // v54-Diagnosehooks: Offsets gelten nur fuer die neue Binary, in v59 (laser) abgeschaltet
                 const rv = (a) => { try {
                     const r = a.sub(B);
@@ -906,10 +988,16 @@ const Act = (() => {
                         alog("[LS] Screen-State: " + lastCur + " -> " + cur + " (angefordert=" + req + ")");
                         lastCur = cur;
                     }
-                    if (started) {
-                        if (forced || lastCur !== -999) { /* weiter loggen */ }
-                        return;
+                    // Ohne laufenden ScreenManager-Hook (kein Update-Treffer) pflegt der Timer die Startscreen-Texte selbst, auf dem Haupt-Thread
+                    if (ACT_CFG.HUD && hud.build && !hud.gone && Date.now() - hk.lastUpd > 1500) {
+                        onMain(() => { try {
+                            if (hud.build && !hud.gone)
+                                hudTick();
+                        }
+                        catch (_) { /* egal */ } });
                     }
+                    if (started && !ACT_CFG.ALWAYS_LOGIN)
+                        return;
                     if (!ACT_CFG.FORCE_LOGIN || forced)
                         return;
                     if (mgr.add(MG.LOAD).readPointer().isNull())
@@ -936,6 +1024,8 @@ const Act = (() => {
             const fl = { done: false };
             Interceptor.attach(B.add(0x315cc0), {
                 onEnter(args) {
+                    hk.upd++;
+                    hk.lastUpd = Date.now();
                     try {
                         if (ACT_CFG.HUD && hud.build && !hud.gone)
                             hudTick();

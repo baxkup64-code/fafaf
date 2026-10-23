@@ -282,11 +282,11 @@ TRAMP_HEAD = r""".text
 .macro KM_BL_BASE_PLUS target, ret
     adrp x17, _kitmod_base@PAGE
     ldr  x17, [x17, _kitmod_base@PAGEOFF]
-    movz x30, #(\\ret & 0xffff)
-    movk x30, #((\\ret >> 16) & 0xffff), lsl #16
+    movz x30, #(\ret & 0xffff)
+    movk x30, #((\ret >> 16) & 0xffff), lsl #16
     add  x30, x17, x30
-    movz x16, #(\\target & 0xffff)
-    movk x16, #((\\target >> 16) & 0xffff), lsl #16
+    movz x16, #(\target & 0xffff)
+    movk x16, #((\target >> 16) & 0xffff), lsl #16
     add  x16, x17, x16
     br   x16
 .endmacro
